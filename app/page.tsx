@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { datadogRum } from "@datadog/browser-rum";
 
 type RankedStreet = {
   streetName: string;
@@ -11,6 +12,8 @@ type RankedStreet = {
 };
 
 export default function HomePage() {
+  const enableMapLinks = true;
+
   const [postcode, setPostcode] = useState("SW1A 1AA");
   const [radius, setRadius] = useState(2);
   const [results, setResults] = useState<RankedStreet[]>([]);
@@ -19,6 +22,11 @@ export default function HomePage() {
   const [error, setError] = useState("");
 
   async function handleSearch() {
+    datadogRum.addAction("postcode_search_started", {
+      postcode,
+      radius,
+    });
+
     setLoading(true);
     setError("");
     setResults([]);
@@ -44,7 +52,19 @@ export default function HomePage() {
 
       setResults(data.results ?? []);
       setSearchedPostcode(data.postcode ?? postcode);
+
+      datadogRum.addAction("postcode_search_completed", {
+        postcode: data.postcode ?? postcode,
+        radius,
+        resultsCount: data.results?.length ?? 0,
+      });
     } catch (err) {
+      datadogRum.addError(err, {
+        postcode,
+        radius,
+        source: "postcode_search",
+      });
+
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
       setLoading(false);
@@ -262,6 +282,7 @@ export default function HomePage() {
                   key={`${street.streetName}-${index}`}
                   street={street}
                   index={index}
+                  enableMapLinks={enableMapLinks}
                 />
               ))}
             </div>
@@ -297,9 +318,12 @@ export default function HomePage() {
 function StreetCard({
   street,
   index,
+  enableMapLinks,
 }: {
   street: RankedStreet;
   index: number;
+
+  enableMapLinks: boolean;
 }) {
   const score = Math.max(0, Math.min(100, Math.round(street.score)));
 
@@ -337,25 +361,27 @@ function StreetCard({
         {street.reasoning}
       </p>
 
-      <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <a
-          href={street.googleMapsUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="rounded-2xl border border-white/10 px-4 py-3 text-center text-sm font-black text-white transition hover:border-teal-300/40 hover:bg-teal-300/10"
-        >
-          Google Maps
-        </a>
+      {enableMapLinks && (
+        <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <a
+            href={street.googleMapsUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-2xl border border-white/10 px-4 py-3 text-center text-sm font-black text-white transition hover:border-teal-300/40 hover:bg-teal-300/10"
+          >
+            Google Maps
+          </a>
 
-        <a
-          href={street.wazeUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="rounded-2xl bg-white px-4 py-3 text-center text-sm font-black text-slate-950 transition hover:bg-teal-200"
-        >
-          Waze
-        </a>
-      </div>
+          <a
+            href={street.wazeUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-2xl bg-white px-4 py-3 text-center text-sm font-black text-slate-950 transition hover:bg-teal-200"
+          >
+            Waze
+          </a>
+        </div>
+      )}
     </article>
   );
 }

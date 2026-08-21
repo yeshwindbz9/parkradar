@@ -7,7 +7,7 @@ const OVERPASS_ENDPOINTS = [
 ];
 
 const USER_AGENT =
-  "ParkRadarMVP/1.0 (local-development; contact: parkradar@example.com)";
+  "ParkRadarMVP/1.0 (parking discovery app; contact: parkradar@example.com)";
 
 type OverpassElement = {
   type: string;
@@ -29,75 +29,99 @@ type OverpassResponse = {
 export async function fetchNearbyStreets(
   lat: number,
   lon: number,
-  radiusMiles: number
+  radiusMiles: number,
 ): Promise<StreetCandidate[]> {
-  const radiusMeters = Math.min(Math.max(radiusMiles, 0.25), 5) * 1609.34;
+  const requestedRadiusMeters = radiusMiles * 1609.34;
 
-  const query = `
-[out:json][timeout:25];
-(
-  way["highway"]["name"](around:${Math.round(radiusMeters)},${lat},${lon});
-);
-out center tags;
-`;
+  /**
+   * Important:
+   * A 5-mile Overpass query in dense UK cities can be huge.
+   * We cap and retry smaller radii so public Overpass instances do not fail.
+   */
+  const radiusAttempts = [Math.min(requestedRadiusMeters, 1600), 1000, 600];
 
   let lastError: unknown = null;
 
-  for (const endpoint of OVERPASS_ENDPOINTS) {
-    try {
-      console.log("Trying Overpass endpoint:", endpoint);
+  for (const radiusMeters of radiusAttempts) {
+    for (const endpoint of OVERPASS_ENDPOINTS) {
+      try {
+        console.log("Trying Overpass endpoint:", endpoint);
+        console.log("Trying radius meters:", Math.round(radiusMeters));
 
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "User-Agent": USER_AGENT,
-        },
-        body: new URLSearchParams({
-          data: query,
-        }).toString(),
-      });
+        const query = buildOverpassQuery(lat, lon, radiusMeters);
 
-      if (!response.ok) {
-        const errorText = await response.text();
-
-        console.error("Overpass failed:", {
-          endpoint,
-          status: response.status,
-          errorText: errorText.slice(0, 500),
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": USER_AGENT,
+          },
+          body: new URLSearchParams({
+            data: query,
+          }).toString(),
         });
 
-        lastError = new Error(
-          `Overpass failed at ${endpoint} with status ${response.status}`
+        if (!response.ok) {
+          const errorText = await response.text();
+
+          console.error("Overpass failed:", {
+            endpoint,
+            radiusMeters: Math.round(radiusMeters),
+            status: response.status,
+            errorText: errorText.slice(0, 500),
+          });
+
+          lastError = new Error(
+            `Overpass failed at ${endpoint} with status ${response.status}`,
+          );
+
+          continue;
+        }
+
+        const data = (await response.json()) as OverpassResponse;
+
+        const streets = extractStreetCandidates(data);
+
+        console.log("OSM streets found:", streets.length);
+        console.log(
+          "Street names:",
+          streets.map((street) => street.name),
         );
 
-        continue;
+        if (streets.length > 0) {
+          return streets;
+        }
+
+        lastError = new Error(
+          `No named streets found from ${endpoint} at radius ${radiusMeters}`,
+        );
+      } catch (error) {
+        console.error("Overpass request crashed:", {
+          endpoint,
+          radiusMeters: Math.round(radiusMeters),
+          error,
+        });
+
+        lastError = error;
       }
-
-      const data = (await response.json()) as OverpassResponse;
-
-      const streets = extractStreetCandidates(data);
-
-      console.log("OSM streets found:", streets.length);
-      console.log(
-        "Street names:",
-        streets.map((street) => street.name)
-      );
-
-      if (streets.length > 0) {
-        return streets;
-      }
-
-      lastError = new Error(`No named streets found from ${endpoint}`);
-    } catch (error) {
-      console.error("Overpass request crashed:", endpoint, error);
-      lastError = error;
     }
   }
 
   throw lastError instanceof Error
     ? lastError
     : new Error("Could not fetch nearby streets from OpenStreetMap");
+}
+
+function buildOverpassQuery(lat: number, lon: number, radiusMeters: number) {
+  const radius = Math.round(radiusMeters);
+
+  return `
+[out:json][timeout:20];
+(
+  way["highway"~"^(residential|living_street|unclassified|tertiary|secondary|primary)$"]["name"](around:${radius},${lat},${lon});
+);
+out center tags 40;
+`;
 }
 
 function extractStreetCandidates(data: OverpassResponse): StreetCandidate[] {

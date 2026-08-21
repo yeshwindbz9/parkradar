@@ -14,14 +14,14 @@ export async function POST(request: NextRequest) {
     if (!postcode) {
       return NextResponse.json(
         { error: "Postcode is required" },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
     if (!Number.isFinite(radius) || radius < 0.25 || radius > 5) {
       return NextResponse.json(
         { error: "Radius must be between 0.25 and 5 miles" },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -30,23 +30,23 @@ export async function POST(request: NextRequest) {
     let streets: StreetCandidate[] = [];
 
     try {
-    streets = await fetchNearbyStreets(location.lat, location.lon, radius);
+      streets = await fetchNearbyStreets(location.lat, location.lon, radius);
 
-    console.log("OSM streets found:", streets.length);
-    // console.log(
-    //     "Street names:",
-    //     streets.map((street) => street.name)
-    // );
+      console.log("OSM streets found:", streets.length);
+      // console.log(
+      //     "Street names:",
+      //     streets.map((street) => street.name)
+      // );
     } catch (error) {
-    console.error("OSM street lookup failed:", error);
+      console.error("OSM street lookup failed:", error);
 
-    return NextResponse.json(
+      return NextResponse.json(
         {
-        error:
-            "Could not fetch real nearby streets from OpenStreetMap. Please try again in a moment or increase the radius.",
+          error:
+            "Street lookup is temporarily unavailable. Please try again in a moment or use a smaller radius.",
         },
-        { status: 502 }
-    );
+        { status: 502 },
+      );
     }
 
     if (streets.length === 0) {
@@ -93,7 +93,7 @@ export async function POST(request: NextRequest) {
             ? error.message
             : "Something went wrong. Please try another UK postcode.",
       },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

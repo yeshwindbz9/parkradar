@@ -7,7 +7,7 @@ const OVERPASS_ENDPOINTS = [
 ];
 
 const USER_AGENT =
-  "ParkRadarMVP/1.0 (parking discovery app; contact: parkradar@example.com)";
+  "Mozilla/5.0 ParkRadarMVP/1.0 (https://parkradar.vercel.app; contact: parkradar@example.com)";
 
 type OverpassElement = {
   type: string;
@@ -26,19 +26,63 @@ type OverpassResponse = {
   elements?: OverpassElement[];
 };
 
+type NominatimPlace = {
+  display_name?: string;
+  name?: string;
+  type?: string;
+  class?: string;
+  lat?: string;
+  lon?: string;
+  address?: {
+    road?: string;
+    pedestrian?: string;
+    neighbourhood?: string;
+    suburb?: string;
+    city?: string;
+    town?: string;
+    village?: string;
+  };
+};
+
 export async function fetchNearbyStreets(
+  lat: number,
+  lon: number,
+  radiusMiles: number,
+): Promise<StreetCandidate[]> {
+  try {
+    const overpassStreets = await fetchNearbyStreetsFromOverpass(
+      lat,
+      lon,
+      radiusMiles,
+    );
+
+    if (overpassStreets.length > 0) {
+      return overpassStreets;
+    }
+  } catch (error) {
+    console.error(
+      "All Overpass attempts failed. Falling back to Nominatim:",
+      error,
+    );
+  }
+
+  const nominatimStreets = await fetchNearbyStreetsFromNominatim(lat, lon);
+
+  if (nominatimStreets.length > 0) {
+    return nominatimStreets;
+  }
+
+  throw new Error("Could not fetch nearby streets from OpenStreetMap services");
+}
+
+async function fetchNearbyStreetsFromOverpass(
   lat: number,
   lon: number,
   radiusMiles: number,
 ): Promise<StreetCandidate[]> {
   const requestedRadiusMeters = radiusMiles * 1609.34;
 
-  /**
-   * Important:
-   * A 5-mile Overpass query in dense UK cities can be huge.
-   * We cap and retry smaller radii so public Overpass instances do not fail.
-   */
-  const radiusAttempts = [Math.min(requestedRadiusMeters, 1600), 1000, 600];
+  const radiusAttempts = [Math.min(requestedRadiusMeters, 1200), 800, 500];
 
   let lastError: unknown = null;
 
@@ -49,16 +93,15 @@ export async function fetchNearbyStreets(
         console.log("Trying radius meters:", Math.round(radiusMeters));
 
         const query = buildOverpassQuery(lat, lon, radiusMeters);
+        const url = `${endpoint}?data=${encodeURIComponent(query)}`;
 
-        const response = await fetch(endpoint, {
-          method: "POST",
+        const response = await fetch(url, {
+          method: "GET",
           headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
             "User-Agent": USER_AGENT,
+            "Accept-Language": "en-GB,en;q=0.9",
           },
-          body: new URLSearchParams({
-            data: query,
-          }).toString(),
+          cache: "no-store",
         });
 
         if (!response.ok) {
@@ -79,10 +122,9 @@ export async function fetchNearbyStreets(
         }
 
         const data = (await response.json()) as OverpassResponse;
-
         const streets = extractStreetCandidates(data);
 
-        console.log("OSM streets found:", streets.length);
+        console.log("OSM Overpass streets found:", streets.length);
         console.log(
           "Street names:",
           streets.map((street) => street.name),
@@ -109,18 +151,18 @@ export async function fetchNearbyStreets(
 
   throw lastError instanceof Error
     ? lastError
-    : new Error("Could not fetch nearby streets from OpenStreetMap");
+    : new Error("Could not fetch nearby streets from Overpass");
 }
 
 function buildOverpassQuery(lat: number, lon: number, radiusMeters: number) {
   const radius = Math.round(radiusMeters);
 
   return `
-[out:json][timeout:20];
+[out:json][timeout:15];
 (
   way["highway"~"^(residential|living_street|unclassified|tertiary|secondary|primary)$"]["name"](around:${radius},${lat},${lon});
 );
-out center tags 40;
+out center tags 30;
 `;
 }
 
@@ -159,4 +201,98 @@ function extractStreetCandidates(data: OverpassResponse): StreetCandidate[] {
   }
 
   return Array.from(streets.values()).slice(0, 30);
+}
+
+async function fetchNearbyStreetsFromNominatim(
+  lat: number,
+  lon: number,
+): Promise<StreetCandidate[]> {
+  console.log("Trying Nominatim fallback");
+
+  /**
+   * Small bounding box around the postcode coordinate.
+   * Roughly around 1-1.5km depending on latitude.
+   */
+  const delta = 0.012;
+
+  const left = lon - delta;
+  const right = lon + delta;
+  const top = lat + delta;
+  const bottom = lat - delta;
+
+  const params = new URLSearchParams({
+    format: "jsonv2",
+    q: "street",
+    bounded: "1",
+    limit: "30",
+    addressdetails: "1",
+    viewbox: `${left},${top},${right},${bottom}`,
+  });
+
+  const response = await fetch(
+    `https://nominatim.openstreetmap.org/search?${params.toString()}`,
+    {
+      method: "GET",
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "en-GB,en;q=0.9",
+      },
+      cache: "no-store",
+    },
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+
+    console.error("Nominatim fallback failed:", {
+      status: response.status,
+      errorText: errorText.slice(0, 500),
+    });
+
+    throw new Error(`Nominatim failed with status ${response.status}`);
+  }
+
+  const places = (await response.json()) as NominatimPlace[];
+
+  const streets = new Map<string, StreetCandidate>();
+
+  for (const place of places) {
+    const road =
+      place.address?.road ??
+      place.address?.pedestrian ??
+      place.name ??
+      extractStreetNameFromDisplayName(place.display_name);
+
+    if (!road) continue;
+
+    const cleanName = road.trim();
+
+    if (!cleanName) continue;
+
+    streets.set(cleanName, {
+      name: cleanName,
+      lat: place.lat ? Number(place.lat) : undefined,
+      lon: place.lon ? Number(place.lon) : undefined,
+    });
+  }
+
+  const result = Array.from(streets.values()).slice(0, 20);
+
+  console.log("Nominatim streets found:", result.length);
+  console.log(
+    "Nominatim street names:",
+    result.map((street) => street.name),
+  );
+
+  return result;
+}
+
+function extractStreetNameFromDisplayName(displayName?: string) {
+  if (!displayName) return undefined;
+
+  const firstPart = displayName.split(",")[0]?.trim();
+
+  if (!firstPart) return undefined;
+
+  return firstPart;
 }

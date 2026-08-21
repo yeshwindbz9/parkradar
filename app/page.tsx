@@ -161,7 +161,7 @@ export default function HomePage() {
 
               <div className="mt-5 grid grid-cols-3 gap-3 text-center">
                 <MiniMetric label="Tech" value="React" />
-                <MiniMetric label="Data" value="OSM" />
+                <MiniMetric label="Data" value="Geoapify" />
                 <MiniMetric label="AI" value="Gemini" />
               </div>
             </div>

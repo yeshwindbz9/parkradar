@@ -1,46 +1,19 @@
 import type { StreetCandidate } from "./types";
 
-const OVERPASS_ENDPOINTS = [
-  "https://overpass.kumi.systems/api/interpreter",
-  "https://overpass.private.coffee/api/interpreter",
-];
-
-const USER_AGENT =
-  "ParkRadarMVP/1.0 (parking discovery app; contact: parkradar@example.com)";
-
-type OverpassElement = {
-  type: string;
-  id: number;
-  tags?: {
+type GeoapifyFeature = {
+  properties?: {
     name?: string;
-    highway?: string;
-  };
-  center?: {
+    street?: string;
+    address_line1?: string;
+    formatted?: string;
+    result_type?: string;
     lat?: number;
     lon?: number;
   };
 };
 
-type OverpassResponse = {
-  elements?: OverpassElement[];
-};
-
-type NominatimPlace = {
-  display_name?: string;
-  name?: string;
-  type?: string;
-  class?: string;
-  lat?: string;
-  lon?: string;
-  address?: {
-    road?: string;
-    pedestrian?: string;
-    neighbourhood?: string;
-    suburb?: string;
-    city?: string;
-    town?: string;
-    village?: string;
-  };
+type GeoapifyResponse = {
+  features?: GeoapifyFeature[];
 };
 
 export async function fetchNearbyStreets(
@@ -48,273 +21,184 @@ export async function fetchNearbyStreets(
   lon: number,
   radiusMiles: number,
 ): Promise<StreetCandidate[]> {
-  try {
-    const overpassStreets = await fetchNearbyStreetsFromOverpass(
-      lat,
-      lon,
-      radiusMiles,
-    );
+  const apiKey = process.env.GEOAPIFY_API_KEY;
 
-    if (overpassStreets.length > 0) {
-      return overpassStreets;
-    }
-  } catch (error) {
-    console.error(
-      "All Overpass attempts failed. Falling back to Nominatim:",
-      error,
-    );
+  if (!apiKey) {
+    throw new Error("Missing GEOAPIFY_API_KEY");
   }
 
-  const nominatimStreets = await fetchNearbyStreetsFromNominatim(lat, lon);
+  const radiusMeters = Math.min(Math.max(radiusMiles, 0.5), 5) * 1609.34;
 
-  if (nominatimStreets.length > 0) {
-    return nominatimStreets;
-  }
+  const streets = new Map<string, StreetCandidate>();
 
-  throw new Error("Could not fetch nearby streets from OpenStreetMap services");
-}
+  const searchTerms = buildStreetSearchTerms(radiusMiles);
 
-async function fetchNearbyStreetsFromOverpass(
-  lat: number,
-  lon: number,
-  radiusMiles: number,
-): Promise<StreetCandidate[]> {
-  const requestedRadiusMeters = radiusMiles * 1609.34;
-
-  /**
-   * Important:
-   * Large Overpass queries can be slow or fail, especially in dense city areas.
-   * For MVP reliability, we cap the actual OSM query radius to 800m.
-   */
-  const radiusMeters = Math.min(requestedRadiusMeters, 800);
-
-  let lastError: unknown = null;
-
-  for (const endpoint of OVERPASS_ENDPOINTS) {
+  for (const searchTerm of searchTerms) {
     try {
-      console.log("Trying Overpass endpoint:", endpoint);
-      console.log("Trying radius meters:", Math.round(radiusMeters));
-
-      const query = buildOverpassQuery(lat, lon, radiusMeters);
-      const url = `${endpoint}?data=${encodeURIComponent(query)}`;
-
-      const response = await fetchWithTimeout(url, {
-        method: "GET",
-        headers: {
-          "User-Agent": USER_AGENT,
-          "Accept-Language": "en-GB,en;q=0.9",
-        },
-        cache: "no-store",
+      const results = await searchGeoapifyStreets({
+        searchTerm,
+        lat,
+        lon,
+        radiusMeters,
+        apiKey,
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-
-        console.error("Overpass failed:", {
-          endpoint,
-          radiusMeters: Math.round(radiusMeters),
-          status: response.status,
-          errorText: errorText.slice(0, 500),
-        });
-
-        lastError = new Error(
-          `Overpass failed at ${endpoint} with status ${response.status}`,
-        );
-
-        continue;
+      for (const street of results) {
+        if (!streets.has(street.name)) {
+          streets.set(street.name, street);
+        }
       }
 
-      const data = (await response.json()) as OverpassResponse;
-      const streets = extractStreetCandidates(data);
-
-      console.log("OSM Overpass streets found:", streets.length);
-      console.log(
-        "Street names:",
-        streets.map((street) => street.name),
-      );
-
-      if (streets.length > 0) {
-        return streets;
+      if (streets.size >= 20) {
+        break;
       }
-
-      lastError = new Error(`No named streets found from ${endpoint}`);
     } catch (error) {
-      console.error("Overpass request crashed:", {
-        endpoint,
-        radiusMeters: Math.round(radiusMeters),
+      console.error("Geoapify street search failed:", {
+        searchTerm,
         error,
       });
-
-      lastError = error;
     }
   }
 
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("Could not fetch nearby streets from Overpass");
-}
+  const result = Array.from(streets.values()).slice(0, 30);
 
-function buildOverpassQuery(lat: number, lon: number, radiusMeters: number) {
-  const radius = Math.round(radiusMeters);
-
-  return `
-[out:json][timeout:15];
-(
-  way["highway"~"^(residential|living_street|unclassified|tertiary|secondary|primary)$"]["name"](around:${radius},${lat},${lon});
-);
-out center tags 30;
-`;
-}
-
-function extractStreetCandidates(data: OverpassResponse): StreetCandidate[] {
-  const streets = new Map<string, StreetCandidate>();
-
-  const excluded = new Set([
-    "footway",
-    "path",
-    "cycleway",
-    "pedestrian",
-    "steps",
-    "bridleway",
-    "track",
-    "service",
-    "motorway",
-    "motorway_link",
-    "trunk",
-    "trunk_link",
-  ]);
-
-  for (const element of data.elements ?? []) {
-    const name = element.tags?.name?.trim();
-    const highway = element.tags?.highway;
-
-    if (!name || !highway) continue;
-    if (excluded.has(highway)) continue;
-
-    if (!streets.has(name)) {
-      streets.set(name, {
-        name,
-        lat: element.center?.lat,
-        lon: element.center?.lon,
-      });
-    }
-  }
-
-  return Array.from(streets.values()).slice(0, 30);
-}
-
-async function fetchNearbyStreetsFromNominatim(
-  lat: number,
-  lon: number,
-): Promise<StreetCandidate[]> {
-  console.log("Trying Nominatim fallback");
-
-  /**
-   * Small bounding box around the postcode coordinate.
-   * This is roughly 1-1.5km depending on latitude.
-   */
-  const delta = 0.012;
-
-  const left = lon - delta;
-  const right = lon + delta;
-  const top = lat + delta;
-  const bottom = lat - delta;
-
-  const params = new URLSearchParams({
-    format: "jsonv2",
-    q: "street",
-    bounded: "1",
-    limit: "30",
-    addressdetails: "1",
-    viewbox: `${left},${top},${right},${bottom}`,
-  });
-
-  const response = await fetchWithTimeout(
-    `https://nominatim.openstreetmap.org/search?${params.toString()}`,
-    {
-      method: "GET",
-      headers: {
-        "User-Agent": USER_AGENT,
-        "Accept-Language": "en-GB,en;q=0.9",
-      },
-      cache: "no-store",
-    },
-    5000,
-  );
-
-  if (!response.ok) {
-    const errorText = await response.text();
-
-    console.error("Nominatim fallback failed:", {
-      status: response.status,
-      errorText: errorText.slice(0, 500),
-    });
-
-    throw new Error(`Nominatim failed with status ${response.status}`);
-  }
-
-  const places = (await response.json()) as NominatimPlace[];
-
-  const streets = new Map<string, StreetCandidate>();
-
-  for (const place of places) {
-    const road =
-      place.address?.road ??
-      place.address?.pedestrian ??
-      place.name ??
-      extractStreetNameFromDisplayName(place.display_name);
-
-    if (!road) continue;
-
-    const cleanName = road.trim();
-
-    if (!cleanName) continue;
-
-    streets.set(cleanName, {
-      name: cleanName,
-      lat: place.lat ? Number(place.lat) : undefined,
-      lon: place.lon ? Number(place.lon) : undefined,
-    });
-  }
-
-  const result = Array.from(streets.values()).slice(0, 20);
-
-  console.log("Nominatim streets found:", result.length);
+  console.log("Geoapify streets found:", result.length);
   console.log(
-    "Nominatim street names:",
+    "Street names:",
     result.map((street) => street.name),
   );
+
+  if (result.length === 0) {
+    throw new Error("Could not find nearby streets from Geoapify");
+  }
 
   return result;
 }
 
-function extractStreetNameFromDisplayName(displayName?: string) {
-  if (!displayName) return undefined;
+function buildStreetSearchTerms(radiusMiles: number) {
+  /**
+   * Geoapify geocoding is search-based.
+   * We search common UK street suffixes and bias/filter around the postcode.
+   */
+  const broadTerms = [
+    "street",
+    "road",
+    "lane",
+    "avenue",
+    "close",
+    "crescent",
+    "drive",
+    "place",
+    "terrace",
+    "way",
+  ];
 
-  const firstPart = displayName.split(",")[0]?.trim();
+  if (radiusMiles <= 1) {
+    return broadTerms.slice(0, 5);
+  }
+
+  if (radiusMiles <= 3) {
+    return broadTerms.slice(0, 8);
+  }
+
+  return broadTerms;
+}
+
+async function searchGeoapifyStreets(params: {
+  searchTerm: string;
+  lat: number;
+  lon: number;
+  radiusMeters: number;
+  apiKey: string;
+}): Promise<StreetCandidate[]> {
+  const { searchTerm, lat, lon, radiusMeters, apiKey } = params;
+
+  const queryParams = new URLSearchParams({
+    text: searchTerm,
+    type: "street",
+    filter: `circle:${lon},${lat},${Math.round(radiusMeters)}`,
+    bias: `proximity:${lon},${lat}`,
+    lang: "en",
+    limit: "10",
+    format: "geojson",
+    apiKey,
+  });
+
+  const url = `https://api.geoapify.com/v1/geocode/search?${queryParams.toString()}`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+
+    console.error("Geoapify API error:", {
+      status: response.status,
+      errorText: errorText.slice(0, 500),
+    });
+
+    throw new Error(`Geoapify failed with status ${response.status}`);
+  }
+
+  const data = (await response.json()) as GeoapifyResponse;
+
+  return extractStreetCandidates(data);
+}
+
+function extractStreetCandidates(data: GeoapifyResponse): StreetCandidate[] {
+  const streets = new Map<string, StreetCandidate>();
+
+  for (const feature of data.features ?? []) {
+    const props = feature.properties;
+
+    if (!props) continue;
+
+    const rawName =
+      props.street ?? props.name ?? props.address_line1 ?? props.formatted;
+
+    const streetName = cleanStreetName(rawName);
+
+    if (!streetName) continue;
+
+    streets.set(streetName, {
+      name: streetName,
+      lat: props.lat,
+      lon: props.lon,
+    });
+  }
+
+  return Array.from(streets.values());
+}
+
+function cleanStreetName(value?: string) {
+  if (!value) return undefined;
+
+  const firstPart = value.split(",")[0]?.trim();
 
   if (!firstPart) return undefined;
 
-  return firstPart;
-}
+  const withoutLeadingNumber = firstPart.replace(/^\d+[A-Za-z]?\s+/, "").trim();
 
-async function fetchWithTimeout(
-  url: string,
-  options: RequestInit,
-  timeoutMs = 5000,
-): Promise<Response> {
-  const controller = new AbortController();
+  if (!withoutLeadingNumber) return undefined;
 
-  const timeout = setTimeout(() => {
-    controller.abort();
-  }, timeoutMs);
+  const tooGeneric = new Set([
+    "street",
+    "road",
+    "lane",
+    "avenue",
+    "close",
+    "crescent",
+    "drive",
+    "place",
+    "terrace",
+    "way",
+  ]);
 
-  try {
-    return await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timeout);
+  if (tooGeneric.has(withoutLeadingNumber.toLowerCase())) {
+    return undefined;
   }
+
+  return withoutLeadingNumber;
 }

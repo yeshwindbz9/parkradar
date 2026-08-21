@@ -1,13 +1,12 @@
 import type { StreetCandidate } from "./types";
 
 const OVERPASS_ENDPOINTS = [
-  "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
   "https://overpass.private.coffee/api/interpreter",
 ];
 
 const USER_AGENT =
-  "Mozilla/5.0 ParkRadarMVP/1.0 (https://parkradar.vercel.app; contact: parkradar@example.com)";
+  "ParkRadarMVP/1.0 (parking discovery app; contact: parkradar@example.com)";
 
 type OverpassElement = {
   type: string;
@@ -82,70 +81,71 @@ async function fetchNearbyStreetsFromOverpass(
 ): Promise<StreetCandidate[]> {
   const requestedRadiusMeters = radiusMiles * 1609.34;
 
-  const radiusAttempts = [Math.min(requestedRadiusMeters, 1200), 800, 500];
+  /**
+   * Important:
+   * Large Overpass queries can be slow or fail, especially in dense city areas.
+   * For MVP reliability, we cap the actual OSM query radius to 800m.
+   */
+  const radiusMeters = Math.min(requestedRadiusMeters, 800);
 
   let lastError: unknown = null;
 
-  for (const radiusMeters of radiusAttempts) {
-    for (const endpoint of OVERPASS_ENDPOINTS) {
-      try {
-        console.log("Trying Overpass endpoint:", endpoint);
-        console.log("Trying radius meters:", Math.round(radiusMeters));
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    try {
+      console.log("Trying Overpass endpoint:", endpoint);
+      console.log("Trying radius meters:", Math.round(radiusMeters));
 
-        const query = buildOverpassQuery(lat, lon, radiusMeters);
-        const url = `${endpoint}?data=${encodeURIComponent(query)}`;
+      const query = buildOverpassQuery(lat, lon, radiusMeters);
+      const url = `${endpoint}?data=${encodeURIComponent(query)}`;
 
-        const response = await fetch(url, {
-          method: "GET",
-          headers: {
-            "User-Agent": USER_AGENT,
-            "Accept-Language": "en-GB,en;q=0.9",
-          },
-          cache: "no-store",
-        });
+      const response = await fetchWithTimeout(url, {
+        method: "GET",
+        headers: {
+          "User-Agent": USER_AGENT,
+          "Accept-Language": "en-GB,en;q=0.9",
+        },
+        cache: "no-store",
+      });
 
-        if (!response.ok) {
-          const errorText = await response.text();
+      if (!response.ok) {
+        const errorText = await response.text();
 
-          console.error("Overpass failed:", {
-            endpoint,
-            radiusMeters: Math.round(radiusMeters),
-            status: response.status,
-            errorText: errorText.slice(0, 500),
-          });
-
-          lastError = new Error(
-            `Overpass failed at ${endpoint} with status ${response.status}`,
-          );
-
-          continue;
-        }
-
-        const data = (await response.json()) as OverpassResponse;
-        const streets = extractStreetCandidates(data);
-
-        console.log("OSM Overpass streets found:", streets.length);
-        console.log(
-          "Street names:",
-          streets.map((street) => street.name),
-        );
-
-        if (streets.length > 0) {
-          return streets;
-        }
-
-        lastError = new Error(
-          `No named streets found from ${endpoint} at radius ${radiusMeters}`,
-        );
-      } catch (error) {
-        console.error("Overpass request crashed:", {
+        console.error("Overpass failed:", {
           endpoint,
           radiusMeters: Math.round(radiusMeters),
-          error,
+          status: response.status,
+          errorText: errorText.slice(0, 500),
         });
 
-        lastError = error;
+        lastError = new Error(
+          `Overpass failed at ${endpoint} with status ${response.status}`,
+        );
+
+        continue;
       }
+
+      const data = (await response.json()) as OverpassResponse;
+      const streets = extractStreetCandidates(data);
+
+      console.log("OSM Overpass streets found:", streets.length);
+      console.log(
+        "Street names:",
+        streets.map((street) => street.name),
+      );
+
+      if (streets.length > 0) {
+        return streets;
+      }
+
+      lastError = new Error(`No named streets found from ${endpoint}`);
+    } catch (error) {
+      console.error("Overpass request crashed:", {
+        endpoint,
+        radiusMeters: Math.round(radiusMeters),
+        error,
+      });
+
+      lastError = error;
     }
   }
 
@@ -211,7 +211,7 @@ async function fetchNearbyStreetsFromNominatim(
 
   /**
    * Small bounding box around the postcode coordinate.
-   * Roughly around 1-1.5km depending on latitude.
+   * This is roughly 1-1.5km depending on latitude.
    */
   const delta = 0.012;
 
@@ -229,7 +229,7 @@ async function fetchNearbyStreetsFromNominatim(
     viewbox: `${left},${top},${right},${bottom}`,
   });
 
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `https://nominatim.openstreetmap.org/search?${params.toString()}`,
     {
       method: "GET",
@@ -239,6 +239,7 @@ async function fetchNearbyStreetsFromNominatim(
       },
       cache: "no-store",
     },
+    5000,
   );
 
   if (!response.ok) {
@@ -295,4 +296,25 @@ function extractStreetNameFromDisplayName(displayName?: string) {
   if (!firstPart) return undefined;
 
   return firstPart;
+}
+
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs = 5000,
+): Promise<Response> {
+  const controller = new AbortController();
+
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 }

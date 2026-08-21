@@ -2,17 +2,17 @@
 
 ParkRadar is a lightweight AI-assisted web application that helps users in the UK find nearby streets with a higher estimated likelihood of free parking.
 
-Users enter a UK postcode and select a search radius. The app converts the postcode into coordinates, fetches nearby streets from OpenStreetMap, ranks them using Gemini AI, and returns a responsive card-based list with Google Maps and Waze navigation links.
+Users enter a UK postcode and select a search radius. The app converts the postcode into coordinates, fetches nearby street candidates using Geoapify, ranks them using Gemini AI, and returns a responsive card-based list with Google Maps and Waze navigation links.
 
-Live demo: parkradar.vercel.app
+Live demo: https://parkradar.vercel.app
 
 ---
 
 ## Project Status
 
-ParkRadar is a hobby project.
+ParkRadar is a hobby MVP project.
 
-It is not a real-time parking availability system and does not provide legal parking advice. It estimates likely street parking opportunities based on nearby road data and AI-assisted reasoning.
+It is not a real-time parking availability system and does not provide legal parking advice. It estimates likely street parking opportunities based on nearby street/address data and AI-assisted reasoning.
 
 Always check local signs, permit rules, payment zones, and parking restrictions before parking.
 
@@ -23,7 +23,7 @@ Always check local signs, permit rules, payment zones, and parking restrictions 
 - UK postcode search
 - Adjustable search radius
 - Live responsive radius slider
-- Real nearby street extraction from OpenStreetMap
+- Nearby street search using Geoapify
 - AI-assisted parking likelihood ranking using Gemini
 - Fallback ranking if Gemini is unavailable
 - Google Maps navigation links
@@ -53,7 +53,7 @@ Always check local signs, permit rules, payment zones, and parking restrictions 
 ### External APIs
 
 - Postcodes.io
-- OpenStreetMap / Overpass API
+- Geoapify Geocoding API
 - Google Gemini API
 - Google Maps links
 - Waze links
@@ -78,9 +78,9 @@ Next.js Frontend
  ↓
 Postcodes.io
  ↓
-OpenStreetMap / Overpass API
+Geoapify street/address search
  ↓
-Gemini AI Ranking
+Gemini AI ranking
  ↓
 Ranked parking results
  ↓
@@ -97,8 +97,8 @@ Google Maps / Waze navigation
 3. User clicks "Find Parking"
 4. Backend validates the request
 5. Postcodes.io converts postcode to coordinates
-6. OpenStreetMap returns nearby named roads
-7. Gemini ranks the streets
+6. Geoapify returns nearby street/address candidates
+7. Gemini ranks the streets by estimated parking likelihood
 8. Frontend displays results in responsive cards
 9. User opens Google Maps or Waze
 ```
@@ -148,11 +148,11 @@ Main frontend page.
 Responsibilities:
 
 - Render the search UI
-- Manage postcode/radius/results state
+- Manage postcode, radius, results, loading, and error state
 - Call `/api/search`
-- Display loading and error states
-- Render ranked street cards
-- Track search actions in Datadog
+- Display ranked parking result cards
+- Show Google Maps and Waze buttons
+- Track search actions and errors in Datadog
 
 ---
 
@@ -164,7 +164,7 @@ Responsibilities:
 
 - Validate request body
 - Convert postcode to coordinates
-- Fetch nearby streets
+- Fetch nearby street candidates
 - Rank streets using Gemini
 - Return structured JSON results
 
@@ -221,31 +221,37 @@ Output:
 }
 ```
 
+This step is needed because street lookup APIs work better with latitude and longitude than with postcode text alone.
+
 ---
 
 ### `lib/osm.ts`
 
-Fetches nearby named streets using OpenStreetMap Overpass API.
+Despite the filename, this module now handles nearby street discovery using Geoapify.
 
-The app uses multiple Overpass endpoints for better reliability:
+The filename was kept as `osm.ts` to avoid changing imports across the project, but the implementation has been updated from OpenStreetMap/Overpass to Geoapify for better reliability.
+
+Purpose:
+
+- Accept latitude, longitude, and radius
+- Search Geoapify for nearby street/address candidates
+- Extract clean street names
+- Deduplicate results
+- Return a `StreetCandidate[]` list for Gemini ranking
+
+The exported function remains:
 
 ```ts
-const OVERPASS_ENDPOINTS = [
-  "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
-  "https://overpass.private.coffee/api/interpreter",
-];
+fetchNearbyStreets(lat, lon, radiusMiles);
 ```
 
-This was added because public Overpass endpoints can sometimes rate limit, timeout, or reject requests.
-
-A meaningful `User-Agent` is also used because some Overpass instances reject generic requests.
+This keeps the rest of the app structure unchanged.
 
 ---
 
 ### `lib/gemini.ts`
 
-Handles AI ranking.
+Handles AI-assisted street ranking.
 
 Gemini receives:
 
@@ -259,6 +265,14 @@ It returns:
 - ranked streets
 - parking likelihood scores
 - short reasoning text
+
+Gemini is asked to return structured JSON with:
+
+```ts
+streetName;
+score;
+reasoning;
+```
 
 If Gemini fails or no API key is available, the app uses a fallback ranking function so the MVP still works.
 
@@ -286,6 +300,7 @@ Create a local `.env.local` file:
 
 ```env
 GEMINI_API_KEY=your_gemini_api_key
+GEOAPIFY_API_KEY=your_geoapify_api_key
 
 NEXT_PUBLIC_DATADOG_APPLICATION_ID=your_datadog_application_id
 NEXT_PUBLIC_DATADOG_CLIENT_TOKEN=your_datadog_client_token
@@ -298,6 +313,7 @@ Create `.env.example`:
 
 ```env
 GEMINI_API_KEY=
+GEOAPIFY_API_KEY=
 
 NEXT_PUBLIC_DATADOG_APPLICATION_ID=
 NEXT_PUBLIC_DATADOG_CLIENT_TOKEN=
@@ -399,6 +415,7 @@ Add:
 
 ```env
 GEMINI_API_KEY=your_gemini_api_key
+GEOAPIFY_API_KEY=your_geoapify_api_key
 
 NEXT_PUBLIC_DATADOG_APPLICATION_ID=your_datadog_application_id
 NEXT_PUBLIC_DATADOG_CLIENT_TOKEN=your_datadog_client_token
@@ -443,6 +460,7 @@ jobs:
 
     env:
       GEMINI_API_KEY: dummy-key-for-ci
+      GEOAPIFY_API_KEY: dummy-key-for-ci
       NEXT_PUBLIC_DATADOG_APPLICATION_ID: dummy
       NEXT_PUBLIC_DATADOG_CLIENT_TOKEN: dummy
       NEXT_PUBLIC_DATADOG_SITE: datadoghq.com
@@ -527,19 +545,19 @@ Datadog helps answer:
 
 ## Reliability Features
 
-### 1. Overpass API Failover
+### 1. Geoapify Street Lookup
 
-The app tries multiple Overpass endpoints because public OpenStreetMap query services can be unreliable.
+The app now uses Geoapify for nearby street/address discovery instead of relying on public OpenStreetMap Overpass endpoints.
 
-### 2. Meaningful User-Agent
+This improves reliability because the app uses an API key-based service rather than anonymous public infrastructure.
 
-Overpass providers may reject requests without a useful `User-Agent`.
-
-### 3. Gemini Fallback
+### 2. Gemini Fallback
 
 If Gemini fails, the app still returns ranked results using a fallback function.
 
-### 4. Input Validation
+This prevents the app from breaking completely if the AI API is unavailable.
+
+### 3. Input Validation
 
 The API validates:
 
@@ -547,9 +565,34 @@ The API validates:
 - radius
 - radius range
 
-### 5. Graceful Errors
+### 4. Graceful Errors
 
 The frontend shows friendly errors instead of crashing.
+
+### 5. Stable API Shape
+
+The `fetchNearbyStreets()` function still returns the same `StreetCandidate[]` type, so the rest of the backend and frontend did not need major changes when switching from OpenStreetMap/Overpass to Geoapify.
+
+---
+
+## Why Geoapify Replaced OpenStreetMap/Overpass
+
+The first version of ParkRadar used OpenStreetMap Overpass API directly.
+
+This worked locally at times, but public Overpass endpoints could be unreliable from a deployed Vercel app.
+
+Issues encountered included:
+
+- request timeouts
+- `406 Not Acceptable`
+- `500 Internal Server Error`
+- `502 Bad Gateway`
+- slow responses in dense city areas
+- public endpoint instability
+
+A Nominatim fallback was also tested, but public Nominatim can block app-style requests and returned `403 Access Denied`.
+
+Because of this, the app was updated to use Geoapify for street lookup while keeping the same internal project structure.
 
 ---
 
@@ -582,9 +625,9 @@ Used shared types to keep the API and frontend consistent.
 Examples:
 
 ```ts
-StreetCandidate
-RankedStreet
-SearchResponse
+StreetCandidate;
+RankedStreet;
+SearchResponse;
 ```
 
 ### External API Integration
@@ -592,18 +635,41 @@ SearchResponse
 Integrated multiple external services:
 
 - Postcodes.io
-- OpenStreetMap Overpass API
+- Geoapify
 - Gemini API
 - Datadog RUM
 
+### Geoapify Street Search
+
+Learned how to use a location-based search API to fetch street/address candidates near a postcode coordinate.
+
+The app searches common UK street terms such as:
+
+```text
+street
+road
+lane
+avenue
+close
+crescent
+drive
+place
+terrace
+way
+```
+
+Geoapify results are then cleaned, deduplicated, and sent to Gemini.
+
 ### OpenStreetMap and Overpass
 
-Learned that public Overpass APIs can:
+The project initially used public OpenStreetMap Overpass endpoints.
 
-- rate limit requests
-- reject missing User-Agent headers
-- return temporary failures
-- require endpoint failover for reliability
+This taught an important reliability lesson:
+
+- public APIs can rate limit requests
+- public map infrastructure may be unstable
+- serverless deployments can behave differently from local development
+- production apps should avoid depending on anonymous public APIs at request time
 
 ### AI Integration
 
@@ -611,11 +677,27 @@ Learned how to use Gemini for structured ranking and reasoning.
 
 The AI layer is useful for MVP inference, but it is not real-time truth. The app should clearly communicate that results are estimates.
 
+### Prompt Engineering
+
+Gemini is prompted to:
+
+- rank the top 10 streets
+- score each street from 0 to 100
+- prefer likely residential or side-street candidates
+- avoid overclaiming certainty
+- return JSON only
+
 ### Fallback Design
 
 Learned why fallbacks matter.
 
 A demo app should not break completely if one external service fails.
+
+In this project:
+
+- Gemini has a fallback ranking function
+- API errors are caught and returned gracefully
+- frontend errors are displayed instead of crashing the UI
 
 ### Observability
 
@@ -642,6 +724,7 @@ Learned to keep secrets out of GitHub:
 - `.env.example` documents required variables
 - Vercel stores production secrets
 - only `NEXT_PUBLIC_` variables are exposed to the browser
+- private API keys such as `GEMINI_API_KEY` and `GEOAPIFY_API_KEY` stay server-side
 
 ### Feature Flags
 
@@ -668,6 +751,7 @@ ParkRadar does not currently support:
 - saved searches
 - authentication
 - historical parking trends
+- verified parking restrictions
 
 The AI ranking is an estimate and should not be treated as authoritative.
 
@@ -688,6 +772,7 @@ Potential next steps:
 - Add better Gemini prompt evaluation
 - Add Playwright end-to-end tests
 - Add screenshots to README
+- Rename `lib/osm.ts` to `lib/streets.ts` or `lib/geoapify.ts`
 - Add custom domain
 
 ---
@@ -700,15 +785,17 @@ Potential next steps:
 3. Select 1–2 mile radius
 4. Click Find Parking
 5. Show ranked street cards
-6. Explain that streets are fetched from OpenStreetMap
-7. Explain that Gemini ranks parking likelihood
-8. Click Google Maps or Waze
-9. Mention Datadog tracks frontend activity and errors
-10. Mention Vercel auto-deploys from GitHub
+6. Explain that Postcodes.io converts the postcode to coordinates
+7. Explain that Geoapify fetches nearby street/address candidates
+8. Explain that Gemini ranks parking likelihood
+9. Click Google Maps or Waze
+10. Mention Datadog tracks frontend activity and errors
+11. Mention Vercel auto-deploys from GitHub
 ```
 
 ---
 
+## Disclaimer
 
 ParkRadar provides estimated parking likelihood only.
 
